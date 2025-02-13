@@ -49,13 +49,19 @@ module.exports = async (context, req) => {
     const thumbsUp = async () => react('+1')
 
     try {
-        if (command == '/open pr') {
-            if (owner !== 'git-for-windows' || repo !== 'git') return `Ignoring ${command} in unexpected repo: ${commentURL}`
+        if (command === '/open pr') {
+            if (owner !== 'git-for-windows' || !['git', 'msys2-runtime'].includes(repo)) return `Ignoring ${command} in unexpected repo: ${commentURL}`
 
             await checkPermissions()
 
-            const { guessComponentUpdateDetails } = require('./component-updates')
-            const { package_name, version } = guessComponentUpdateDetails(req.body.issue.title, req.body.issue.body)
+            const { guessComponentUpdateDetails, packageNeedsBothMSYSAndMINGW } = require('./component-updates')
+            const { getPRCommitSHA } = require('./issues')
+            const { package_name, version } = repo === 'msys2-runtime'
+                ? {
+                    package_name: repo,
+                    version: await getPRCommitSHA(context, await getToken(), owner, repo, issueNumber)
+                }
+                : guessComponentUpdateDetails(req.body.issue.title, req.body.issue.body)
 
             await thumbsUp()
 
@@ -96,12 +102,41 @@ module.exports = async (context, req) => {
                 );
                 ({ html_url: commentURL, id: commentId } = await appendToIssueComment(context, await getToken(), owner, repo, commentId, `The${packageType ? ` ${packageType}` : ''} workflow run [was started](${answer.html_url})`))
             }
-            if (!['openssl', 'curl', 'gnutls', 'pcre2'].includes(package_name)) {
+            if (!packageNeedsBothMSYSAndMINGW(package_name)) {
                 await openPR(package_name)
             } else {
                 await openPR(package_name, 'MSYS')
                 await openPR(`mingw-w64-${package_name}`, 'MINGW')
             }
+            return `I edited the comment: ${commentURL}`
+        }
+
+        if (command === '/updpkgsums') {
+            if (owner !== 'git-for-windows'
+             || !req.body.issue.pull_request
+             || !['build-extra', 'MINGW-packages', 'MSYS2-packages'].includes(repo)) {
+                return `Ignoring ${command} in unexpected repo: ${commentURL}`
+            }
+
+            await checkPermissions()
+            await thumbsUp()
+
+            const triggerWorkflowDispatch = require('./trigger-workflow-dispatch')
+            const answer = await triggerWorkflowDispatch(
+                context,
+                await getToken(),
+                'git-for-windows',
+                'git-for-windows-automation',
+                'updpkgsums.yml',
+                'main', {
+                    repo,
+                    'pr-number': '' + issueNumber,
+                    actor: commenter
+                }
+            );
+            const { appendToIssueComment } = require('./issues');
+            ({ html_url: commentURL } = await appendToIssueComment(context, await getToken(), owner, repo, commentId, `The workflow run [was started](${answer.html_url}).`))
+
             return `I edited the comment: ${commentURL}`
         }
 
@@ -159,7 +194,7 @@ module.exports = async (context, req) => {
 
             const toTrigger = []
             if (isMSYSPackage(package_name)) {
-                if (package_name !== 'msys2-runtime-3.3') {
+                if (package_name !== 'msys2-runtime-3.3' && !req.body.issue.title.startsWith('i686:')) {
                     toTrigger.push(
                         { architecture: 'x86_64' }
                     )
@@ -171,9 +206,11 @@ module.exports = async (context, req) => {
                     )
                 }
             } else {
-                toTrigger.push(
-                    { displayArchitecture: 'i686/x86_64' }
-                )
+                if (package_name !== 'mingw-w64-llvm') {
+                    toTrigger.push(
+                        { displayArchitecture: 'i686/x86_64' }
+                    )
+                }
                 if (needsSeparateARM64Build(package_name)) {
                     toTrigger.push(
                         { architecture: 'aarch64', displayArchitecture: 'arm64' }
@@ -228,7 +265,7 @@ module.exports = async (context, req) => {
             return `I edited the comment: ${answer.html_url}`
         }
 
-        if (command == '/git-artifacts') {
+        if (command === '/git-artifacts') {
             if (owner !== 'git-for-windows'
              || repo !== 'git'
              || !req.body.issue.pull_request
@@ -330,7 +367,7 @@ module.exports = async (context, req) => {
             }
         }
 
-        if (command == '/release') {
+        if (command === '/release') {
             if (owner !== 'git-for-windows'
               || repo !== 'git'
               || !req.body.issue.pull_request
@@ -363,7 +400,7 @@ module.exports = async (context, req) => {
                 let gitVersion
                 let tagGitWorkflowRunID
                 const workFlowRunIDs = {}
-                for (const architecture of ['x86_64', 'i686']) {
+                for (const architecture of ['x86_64', 'i686', 'aarch64']) {
                     const workflowName = `git-artifacts-${architecture}`
                     const runs = await listCheckRunsForCommit(
                         context,
@@ -410,7 +447,7 @@ module.exports = async (context, req) => {
                     releaseCheckRunId, {
                         output: {
                             title: `Publish ${gitVersion} for @${commitSHA}`,
-                            summary: `Downloading the Git artifacts from ${workFlowRunIDs['x86_64']} and ${workFlowRunIDs['i686']} and publishing them as a new GitHub Release at ${owner}/${repo}`
+                            summary: `Downloading the Git artifacts from ${workFlowRunIDs['x86_64']}, ${workFlowRunIDs['i686']} and ${workFlowRunIDs['aarch64']} and publishing them as a new GitHub Release at ${owner}/${repo}`
                         }
                     }
                 )
@@ -424,7 +461,8 @@ module.exports = async (context, req) => {
                     'release-git.yml',
                     'main', {
                         git_artifacts_x86_64_workflow_run_id: workFlowRunIDs['x86_64'],
-                        git_artifacts_i686_workflow_run_id: workFlowRunIDs['i686']
+                        git_artifacts_i686_workflow_run_id: workFlowRunIDs['i686'],
+                        git_artifacts_aarch64_workflow_run_id: workFlowRunIDs['aarch64'],
                     }
                 )
 
@@ -460,10 +498,18 @@ module.exports = async (context, req) => {
 
             await checkPermissions()
 
+            const { appendToIssueComment } = require('./issues')
             let [ , , , type, message ] = relNotesMatch
             if (!type) {
-                const { guessReleaseNotes } = require('./component-updates');
-                ({ type, message } = await guessReleaseNotes(context, req.body.issue))
+                const { guessReleaseNotes, getMissingDeployments } = require('./component-updates');
+                let package_name, version
+                ({ type, message, package: package_name, version } = await guessReleaseNotes(context, req.body.issue))
+                const missingDeployments = await getMissingDeployments(package_name, version)
+                if (missingDeployments.length > 0) {
+                    const message = `The following deployment(s) are missing:\n\n* ${missingDeployments.join('\n* ')}`
+                    await appendToIssueComment(context, await getToken(), owner, repo, commentId, message)
+                    throw new Error(message)
+                }
             }
 
             await thumbsUp()
@@ -480,9 +526,52 @@ module.exports = async (context, req) => {
                     message
                 }
             )
-            const { appendToIssueComment } = require('./issues')
             const answer2 = await appendToIssueComment(context, await getToken(), owner, repo, commentId, `The workflow run [was started](${answer.html_url})`)
             return `I edited the comment: ${answer2.html_url}`
+        }
+
+        if (command === '/synchronize-sdks' || command === '/sync') {
+            if (owner !== 'git-for-windows') {
+                return `Ignoring ${command} in unexpected repo: ${commentURL}`
+            }
+
+            await checkPermissions()
+
+            await thumbsUp()
+
+            const triggerWorkflowDispatch = require('./trigger-workflow-dispatch')
+            const triggerSync = async (sdkRepo) =>
+                await triggerWorkflowDispatch(
+                    context,
+                    await getToken('git-for-windows', sdkRepo),
+                    'git-for-windows',
+                    sdkRepo,
+                    'sync.yml',
+                    'main'
+                )
+
+            const { appendToIssueComment } = require('./issues')
+            const appendToComment = async (text) =>
+                await appendToIssueComment(
+                    context,
+                    await getToken(),
+                    owner,
+                    repo,
+                    commentId,
+                    text
+                )
+
+            for (const architecture of ['aarch64', 'x86_64', 'i686']) {
+                const sdkRepo = {
+                    aarch64: 'git-sdk-arm64',
+                    x86_64: 'git-sdk-64',
+                    i686: 'git-sdk-32'
+                }[architecture]
+                const sync = await triggerSync(sdkRepo)
+                commentURL = (await appendToComment(`The ['sync' run for ${architecture}](${sync.html_url}) was started.`)).html_url
+            }
+
+            return `I edited the comment: ${commentURL}`
         }
     } catch (e) {
         await react('confused')

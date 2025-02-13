@@ -9,8 +9,8 @@ module.exports = async (context, requestMethod, requestPath, body) => {
     const payload = {
         // issued at time, 60 seconds in the past to allow for clock drift
         iat: now - 60,
-        // JWT expiration time (10 minute maximum)
-        exp: now + (10 * 60),
+        // JWT expiration time (10 minute maximum, use 9 to allow for clock drift)
+        exp: now + (9 * 60),
         // GitHub App's identifier
         iss: process.env['GITHUB_APP_ID']
     }
@@ -29,7 +29,7 @@ module.exports = async (context, requestMethod, requestPath, body) => {
 
     const token = `${headerAndPayload}.${signature}`
 
-    const httpsRequest = require('./https-request')
+    const { httpsRequest } = require('./https-request')
     return await httpsRequest(
         context,
         null,

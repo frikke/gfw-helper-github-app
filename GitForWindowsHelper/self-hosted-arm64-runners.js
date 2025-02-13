@@ -18,13 +18,14 @@ module.exports = async (context, req) => {
     })()
 
     const isAllowed = async (login) => {
+        if (login === 'gitforwindowshelper[bot]') return true
         const getCollaboratorPermissions = require('./get-collaborator-permissions')
         const token = await getToken()
         const permission = await getCollaboratorPermissions(context, token, owner, repo, login)
         return ['ADMIN', 'MAINTAIN', 'WRITE'].includes(permission.toString())
     }
 
-    if (!isAllowed(sender)) {
+    if (!await isAllowed(sender)) {
         if (action !== 'completed') {
             // Cancel workflow run
             const { cancelWorkflowRun } = require('./check-runs')
@@ -46,7 +47,9 @@ module.exports = async (context, req) => {
             'git-for-windows-automation',
             'create-azure-self-hosted-runners.yml',
             'main', {
-                runner_scope: 'repo-level'
+                runner_scope: 'repo-level',
+                // Repository that the runner will be deployed to. We want to ensure that the runner is deployed to the same repository that triggered the action.
+                runner_repo: repo
             }
         )
 
